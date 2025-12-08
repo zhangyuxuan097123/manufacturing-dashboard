@@ -9,7 +9,8 @@ import shutil
 import ast
 from datetime import datetime
 from openpyxl import load_workbook
-import time  # 用於儲存成功後的延遲消失效果
+import time
+import io  # 新增 io 模組以處理檔案串流
 
 # --- 0. 基本設定 ---
 st.set_page_config(page_title="製造系統可靠性戰情室", page_icon="🏭", layout="wide", initial_sidebar_state="expanded")
@@ -17,7 +18,7 @@ st.set_page_config(page_title="製造系統可靠性戰情室", page_icon="🏭"
 # 預設 Excel 路徑
 DEFAULT_EXCEL_PATH = "/mnt/data/專題excel.xlsx"
 
-# --- 1. 全局 CSS (深藍背景 + 白底圖表 + 浮誇動畫) ---
+# --- 1. 全局 CSS (保留原版樣式 + 新增 Modal 樣式) ---
 st.markdown(
     """
     <style>
@@ -229,6 +230,64 @@ st.markdown(
         padding: 10px;
         margin-bottom: 20px;
     }
+
+    /* ========================================================================== */
+    /* MODAL 特殊樣式 (Container + Button Hack) */
+    /* ========================================================================== */
+    
+    /* 1. Modal 遮罩與容器樣式 (使用 ID 鎖定) */
+    div[data-testid="stVerticalBlock"]:has(div#modal-marker) {
+        position: fixed !important;
+        top: 50% !important; left: 50% !important;
+        transform: translate(-50%, -50%) !important;
+        width: 550px !important; max-width: 90vw !important;
+        background-color: rgba(40, 10, 10, 0.98) !important;
+        border-radius: 12px !important;
+        padding: 30px !important;
+        z-index: 1000001 !important;
+        box-shadow: 0 0 50px rgba(0,0,0,0.8) !important;
+        gap: 0px !important;
+    }
+    
+    /* 2. 背景遮罩 */
+    div[data-testid="stVerticalBlock"]:has(div#modal-marker)::before {
+        content: "";
+        position: fixed; top: -100vh; left: -100vw; width: 300vw; height: 300vh;
+        background: rgba(0,0,0,0.6); backdrop-filter: blur(3px); z-index: -1;
+    }
+    
+    /* 3. 隱藏標記 div */
+    div#modal-marker { display: none; }
+
+    /* 4. 強制按鈕置中並位於 Modal 底部 */
+    div:has(> #modal-btn-marker) { display: none; }
+    div:has(> #modal-btn-marker) + div button {
+        position: fixed !important;
+        top: 50% !important;
+        left: 50% !important;
+        transform: translate(-50%, 150px) !important; /* 調整此值以對齊 Modal 底部 */
+        z-index: 1000002 !important;
+        width: 180px !important;
+        background-color: rgba(0,0,0,0.6) !important;
+        color: #fff !important;
+        border: 1px solid rgba(255,255,255,0.3) !important;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.5) !important;
+        display: block !important;
+    }
+    div:has(> #modal-btn-marker) + div button:hover {
+        background-color: rgba(255,255,255,0.1) !important;
+        border-color: #fff !important;
+        transform: translate(-50%, 148px) !important;
+    }
+
+    /* Modal 淡出動畫 */
+    @keyframes fadeOutAnim {
+        0% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+        100% { opacity: 0; transform: translate(-50%, -50%) scale(0.9); }
+    }
+    .modal-fade-out {
+        animation: fadeOutAnim 1s ease-out forwards;
+    }
     </style>
     """,
     unsafe_allow_html=True
@@ -242,21 +301,21 @@ def parse_list_from_string(s):
     if pd.isna(s) or s == "":
         return []
     s = str(s).strip()
+    # 修改重點：先移除可能存在的方括號，統一格式
+    s = s.replace('[', '').replace(']', '')
     try:
-        return ast.literal_eval(s)
+        # 直接用逗號分隔並轉為浮點數列表
+        return [float(x.strip()) for x in s.split(',') if x.strip()]
     except:
-        try:
-            return [float(x.strip()) for x in s.split(',') if x.strip()]
-        except:
-            return None
+        return None
 
 def get_default_data():
     return pd.DataFrame([
-        {"name": "工作站1", "processTime": 0.001686, "timeLimit": 10, "capacities": "[0, 700, 1400, 2100, 2800, 3500]", "probs": "[0.001, 0.003, 0.005, 0.007, 0.012, 0.972]", "p": 0.96, "working_power": 2.89, "idle_power": 0.4335},
-        {"name": "工作站2", "processTime": 0.010065, "timeLimit": 30, "capacities": "[0, 675, 1350, 2025, 2700, 3375]", "probs": "[0.001, 0.003, 0.005, 0.007, 0.012, 0.972]", "p": 0.96, "working_power": 2.89, "idle_power": 0.4335},
-        {"name": "工作站3", "processTime": 0.032278, "timeLimit": 100, "capacities": "[0, 600, 1200, 1800, 2400, 3000]", "probs": "[0.001, 0.003, 0.005, 0.007, 0.012, 0.972]", "p": 0.96, "working_power": 2.89, "idle_power": 0.4335},
-        {"name": "工作站4", "processTime": 0.008732, "timeLimit": 25, "capacities": "[0, 565, 1130, 1695, 2260, 2825]", "probs": "[0.001, 0.003, 0.005, 0.007, 0.012, 0.972]", "p": 0.96, "working_power": 2.89, "idle_power": 0.4335},
-        {"name": "工作站5", "processTime": 0.025224, "timeLimit": 70, "capacities": "[0, 540, 1080, 1620, 2160, 2700]", "probs": "[0.001, 0.003, 0.005, 0.007, 0.012, 0.972]", "p": 0.96, "working_power": 2.89, "idle_power": 0.4335}
+        {"name": "工作站1", "processTime": 0.00168622689869149, "timeLimit": 10, "capacities": "[0, 700, 1400, 2100, 2800, 3500]", "probs": "[0.001, 0.003, 0.005, 0.007, 0.012, 0.972]", "p": 0.96, "working_power": 2.89, "idle_power": 0.4335},
+        {"name": "工作站2", "processTime": 0.0100654252642174, "timeLimit": 30, "capacities": "[0, 675, 1350, 2025, 2700, 3375]", "probs": "[0.001, 0.003, 0.005, 0.007, 0.012, 0.972]", "p": 0.96, "working_power": 2.89, "idle_power": 0.4335},
+        {"name": "工作站3", "processTime": 0.032277587250353, "timeLimit": 100, "capacities": "[0, 600, 1200, 1800, 2400, 3000]", "probs": "[0.001, 0.003, 0.005, 0.007, 0.012, 0.972]", "p": 0.96, "working_power": 2.89, "idle_power": 0.4335},
+        {"name": "工作站4", "processTime": 0.00873202294775631, "timeLimit": 25, "capacities": "[0, 565, 1130, 1695, 2260, 2825]", "probs": "[0.001, 0.003, 0.005, 0.007, 0.012, 0.972]", "p": 0.96, "working_power": 2.89, "idle_power": 0.4335},
+        {"name": "工作站5", "processTime": 0.0252244980324892, "timeLimit": 70, "capacities": "[0, 540, 1080, 1620, 2160, 2700]", "probs": "[0.001, 0.003, 0.005, 0.007, 0.012, 0.972]", "p": 0.96, "working_power": 2.89, "idle_power": 0.4335}
     ])
 
 # 輔助函式：解析 Excel 字串列表
@@ -264,13 +323,12 @@ def parse_list_from_excel_cell(cell_value):
     if cell_value is None: return []
     if isinstance(cell_value, (int, float)): return [cell_value]
     s = str(cell_value).strip()
+    # 修改重點：同樣先移除方括號
+    s = s.replace('[', '').replace(']', '')
     try:
-        return ast.literal_eval(s)
+        return [float(x.strip()) for x in s.split(',') if x.strip()]
     except:
-        try:
-            return [float(x.strip()) for x in s.split(',') if x.strip()]
-        except:
-            return []
+        return []
 
 # 核心載入函式 (Authority Load)
 def load_data_from_excel_authority():
@@ -336,7 +394,6 @@ if "df_data" not in st.session_state:
             st.write("Excel 權威值 (Read-Only):", excel_auth_data)
 
 # 計算邏輯 (Block B)
-@st.cache_data
 def calculate_metrics(demand, carbon_factor, _station_data):
     excel_auth = st.session_state.get("excel_authority", None)
     
@@ -488,11 +545,11 @@ with tab_dashboard:
     else:
         # --- 側欄控制 ---
         with st.sidebar:
+            # 刪除 "調整後右側即時更新" 的小字
             st.markdown(
 """
 <div style='padding:12px 10px; background-color: rgba(255, 255, 255, 0.08); border-radius: 8px; margin-bottom: 15px;'>
 <h3 style='margin:0; color:#ffffff'>系統參數面板</h3>
-<div style='color:#cfeefb; font-size: 0.9em; margin-top: 4px;'>調整後右側即時更新</div>
 </div>
 """, 
 unsafe_allow_html=True
@@ -553,14 +610,16 @@ unsafe_allow_html=True
                 st.markdown(
 f"""
 <div style="position: relative; width: 100%; text-align: center;">
-<div class="topo-node {node_states[i]}" title="{tooltip_text}">S{i+1}</div>
+<div class="topo-node {node_states[i]}" title="{tooltip_text}">{STATION_DATA[i]["name"]}</div>
 {connector_html}
 </div>
 """, 
 unsafe_allow_html=True
                 )
                 btn_type = "primary" if st.session_state.selected_node_idx == i else "secondary"
-                if st.button(f"詳細 {i+1}", key=f"btn_node_{i}", type=btn_type, use_container_width=True):
+                
+                # 修改按鈕文字為 "詳細內容"
+                if st.button("詳細內容", key=f"btn_node_{i}", type=btn_type, use_container_width=True):
                     st.session_state.selected_node_idx = i
                     st.rerun()
 
@@ -747,23 +806,19 @@ unsafe_allow_html=True
         st.latex(r"E_{k,i}^{load} = P_{k,i}^{load} \cdot t_{k,i}^{load} \cdot \lambda")
         st.markdown('<span style="color: #3fe6ff; font-weight: bold;">Stage 2 — 閒置階段 (idle)</span>', unsafe_allow_html=True)
         st.latex(r"E_{k,i}^{idle} = P_{k,i}^{idle} \cdot t_{k,i}^{idle} \cdot \lambda")
-        st.markdown('<span style="color: #3fe6ff; font-weight: bold;">Stage 3 — 重置階段 (reset)</span>', unsafe_allow_html=True)
-        st.latex(r"E_{k,i}^{reset} = P_{k,i}^{reset} \cdot t_{k,i}^{reset} \cdot \lambda")
-        st.markdown('<span style="color: #3fe6ff; font-weight: bold;">Stage 4 — 停機/關機 (off)</span>', unsafe_allow_html=True)
-        st.latex(r"E_{k,i}^{off} = P_{k,i}^{off} \cdot t_{k,i}^{off} = 0")
-        st.markdown('<div style="color: #aaa; font-size: 0.85em; margin-bottom: 15px;">(若停機狀態不消耗電力，或視情況設為 0)</div>', unsafe_allow_html=True)
+        
         st.markdown('<hr style="border-top: 1px solid rgba(255,255,255,0.1); margin: 20px 0;">', unsafe_allow_html=True)
         st.markdown('<span style="color: #f3a21a; font-weight: bold; font-size: 1.1em;">總碳排放</span>', unsafe_allow_html=True)
-        st.latex(r"E_{k,i}^{total} = E_{k,i}^{load} + E_{k,i}^{idle} + E_{k,i}^{reset} + E_{k,i}^{off}")
+        st.latex(r"E_{k,i}^{total} = E_{k,i}^{load} + E_{k,i}^{idle}")
 
         st.markdown("""
 <div style="background: rgba(255,255,255,0.05); padding: 18px; border-radius: 8px; font-size: 0.9em; color: #e6eef6; line-height: 1.7; margin-top: 10px;">
 <ul style="margin: 0; padding-left: 20px;">
-<li><b>I<sub>k,i</sub></b>：第 k 階段、類別 i 的輸入數量 (或與工作站/機器相關的輸入量)。</li>
-<li><b>P<sup>load</sup>, P<sup>idle</sup>, P<sup>reset</sup>, P<sup>off</sup></b>：分別為加工、閒置、重置與停機狀態下的功率 (kW)。</li>
-<li><b>t<sup>load</sup>, t<sup>idle</sup>, t<sup>reset</sup>, t<sup>off</sup></b>：分別為對應狀態的總時間 (小時)。</li>
-<li><b>λ</b>：碳排放係數 (kg CO<sub>2</sub>/kWh)。</li>
-<li>各式 E 的單位為 kg (碳排放量)，計算方式為能耗(kWh) × 碳排放係數(kg/kWh)。</li>
+<li><b>I<sub>k,i</sub></b>：第 k 階段、類別 i 的輸入數量（或與工作站/機器相關的輸入量）。</li>
+<li><b>P<sup>load</sup>, P<sup>idle</sup></b>：分別為加工、閒置狀態下的功率（kW）。</li>
+<li><b>t<sup>load</sup>, t<sup>idle</sup></b>：分別為加工、閒置狀態的總時間（小時）。</li>
+<li><b>λ</b>：碳排放係數（kg CO₂/kWh）。</li>
+<li>各式 E 的單位皆為 kg（碳排放量），計算方式為能耗（kWh）× 碳排放係數（kg/kWh）。</li>
 </ul>
 </div>
 """, unsafe_allow_html=True)
@@ -776,13 +831,53 @@ with tab_editor:
     with col_upload:
         uploaded_file = st.file_uploader("📂 上傳 Excel 檔案 (若未上傳則嘗試讀取本地預設檔)", type=["xlsx"])
     
-    if uploaded_file and uploaded_file.name != st.session_state.get("last_uploaded_name", ""):
-        try:
-            st.session_state.df_data = pd.read_excel(uploaded_file)
-            st.session_state.last_uploaded_name = uploaded_file.name
-            st.rerun()
-        except Exception as e:
-            st.error(f"讀取檔案失敗: {e}")
+    # 狀態變數初始化
+    if "processed_file_id" not in st.session_state: st.session_state.processed_file_id = None
+    if "save_modal_state" not in st.session_state: st.session_state.save_modal_state = "hidden"
+    if "save_error_msgs" not in st.session_state: st.session_state.save_error_msgs = []
+    if "io_error_msg" not in st.session_state: st.session_state.io_error_msg = ""
+    if "upload_error_msg" not in st.session_state: st.session_state.upload_error_msg = ""
+    if "upload_read_ok" not in st.session_state: st.session_state.upload_read_ok = True
+
+    # === 上傳處理邏輯 (修正區塊) ===
+    if uploaded_file:
+        # 使用檔名 + 大小作為簡單的唯一識別，確保相同檔案或新檔案變更都能偵測
+        current_obj_id = f"{uploaded_file.name}_{uploaded_file.size}"
+        
+        # 只要 ID 不同，就視為新的上傳操作 (即使檔名相同但內容變了大小變了，或者使用者重新上傳了)
+        if current_obj_id != st.session_state.processed_file_id:
+            
+            # 1. 嘗試讀取前先標記狀態，避免在 except 之前出錯導致狀態不明
+            st.session_state.upload_read_ok = False
+            
+            try:
+                uploaded_file.seek(0) # 確保從頭讀取
+                bytes_data = uploaded_file.getvalue()
+                new_df = pd.read_excel(io.BytesIO(bytes_data))
+                
+                if new_df.empty:
+                    raise ValueError("上傳的 Excel 檔案中沒有資料")
+
+                # 2. 讀取成功：更新所有相關狀態
+                st.session_state.df_data = new_df
+                st.session_state.processed_file_id = current_obj_id
+                st.session_state.upload_read_ok = True
+                st.session_state.save_modal_state = "hidden" # 隱藏舊的錯誤 Modal
+                if "last_uploaded_name" not in st.session_state:
+                      st.session_state.last_uploaded_name = uploaded_file.name
+                
+                # 3. 立即重新執行以更新介面 (Dashboard, Editor, Charts)
+                st.rerun()
+                
+            except Exception as e:
+                # 4. 讀取失敗：更新 ID 避免無窮迴圈，但標記失敗
+                st.session_state.processed_file_id = current_obj_id
+                st.session_state.upload_read_ok = False # 確保失敗時標記為 False
+                st.session_state.upload_error_msg = str(e)[:300]
+                
+                # 5. 設定 Modal 狀態並 Rerun 以顯示 Modal (不更新 df_data)
+                st.session_state.save_modal_state = "upload_error"
+                st.rerun()
 
     df_source = st.session_state.df_data.copy()
 
@@ -811,8 +906,6 @@ with tab_editor:
     st.markdown("---")
 
     df_display = df_source.copy()
-    
-    # 🔧 修正 1：強制轉換 name 欄位為字串，解決 Column type error
     df_display['name'] = df_display['name'].astype(str)
     
     if "Minute" in time_unit:
@@ -825,10 +918,10 @@ with tab_editor:
         key="editor_key", 
         column_config={
             "name": st.column_config.TextColumn("工作站名稱", required=True),
-            "p": st.column_config.NumberColumn("成功率 p", help="範圍 (0, 1]，預設 0.96", min_value=0.0001, max_value=1.0, step=0.01, format="%.4f", required=True),
-            "working_power": st.column_config.NumberColumn("加工功率 (kW)", min_value=0.0, step=0.1, format="%.4f", required=True),
-            "idle_power": st.column_config.NumberColumn("閒置功率 (kW)", min_value=0.0, step=0.1, format="%.4f", required=True),
-            "processTime": st.column_config.NumberColumn(f"加工時間 ({'hr' if 'Hour' in time_unit else 'min'})", min_value=0.0, format="%.6f", required=True),
+            "p": st.column_config.NumberColumn("成功率 p", help="範圍 (0, 1]，預設 0.96", min_value=0.000001, max_value=1.0, required=True),
+            "working_power": st.column_config.NumberColumn("加工功率 (kW)", min_value=0.0, required=True),
+            "idle_power": st.column_config.NumberColumn("閒置功率 (kW)", min_value=0.0, required=True),
+            "processTime": st.column_config.NumberColumn(f"加工時間 ({'hr' if 'Hour' in time_unit else 'min'})", min_value=0.0, required=True),
             "timeLimit": st.column_config.NumberColumn("時間上限 (hr)", min_value=0.0, required=True),
             "capacities": st.column_config.TextColumn("產能列表 (List)", help="格式: 1,2,3 或 [1,2,3]"),
             "probs": st.column_config.TextColumn("機率列表 (List)", help="格式: 0.1, 0.2... 加總需為 1")
@@ -845,246 +938,135 @@ with tab_editor:
     except Exception:
         st.session_state.df_data = df_normalized
 
-    # 🔧 修正 2：按鈕區域
-    col_btn1, col_btn2 = st.columns([1, 1])
-    
-    with col_btn1:
-        # === 刪除驗證按鈕 (替換位置: col_btn1) ===
-        # 這裡原本是驗證按鈕，已移除以簡化介面
-        st.empty()
+    # 按鈕區域
+    col_reset, col_save = st.columns([1, 1])
 
-    with col_btn2:
-        # === 儲存按鈕 handler (替換位置: with col_btn2) ===
-        # 1. 初始化 Session State 變數
-        if "show_save_error_modal" not in st.session_state:
-            st.session_state.show_save_error_modal = False
-            st.session_state.save_error_list = []
-        if "show_save_success_modal" not in st.session_state:
-            st.session_state.show_save_success_modal = False
-        if "show_io_exception_modal" not in st.session_state:
-            st.session_state.show_io_exception_modal = False
-            st.session_state.io_exception_msg = ""
+    # === 重置按鈕 ===
+    with col_reset:
+        if st.button("🔄 重置為預設資料", use_container_width=True):
+            st.session_state.df_data = get_default_data()
+            st.session_state.save_modal_state = "reset"
+            st.rerun()
 
-        # 2. 定義 Modal 的容器 (必須使用 empty 才能動態清除或覆蓋)
-        modal_container = st.empty()
-
-        # 3. 顯示主按鈕
+    # === 儲存按鈕 ===
+    with col_save:
         if st.button("💾 儲存並更新", use_container_width=True):
-            # --- A. 執行完整資料驗證 ---
+            # 1. 優先檢查上傳狀態：如果目前有上傳檔案，但狀態為讀取失敗 (False)，則禁止儲存
+            if uploaded_file and not st.session_state.get("upload_read_ok", True):
+                st.session_state.save_modal_state = "upload_error"
+                st.rerun()
+            
+            # 2. 執行驗證與寫入
             errors = []
             try:
                 check_df = df_normalized.copy()
                 for idx, row in check_df.iterrows():
-                    # 基礎數值檢查
+                    if not str(row['name']).strip(): errors.append(f"行 {idx+1}: 名稱不可為空")
+                    if not (0 < row['p'] <= 1): errors.append(f"行 {idx+1}: p 必須在 (0, 1] 之間")
                     if row['processTime'] <= 0: errors.append(f"行 {idx+1}: 加工時間必須 > 0")
                     if row['timeLimit'] < 0: errors.append(f"行 {idx+1}: 時間上限必須 >= 0")
-                    if not (0 < row['p'] <= 1): errors.append(f"行 {idx+1}: 成功率 p 必須在 (0, 1] 之間")
-                    if row['working_power'] < 0 or row['idle_power'] < 0: errors.append(f"行 {idx+1}: 功率不能為負數")
-
-                    # 解析列表
+                    if row['working_power'] < 0 or row['idle_power'] < 0: errors.append(f"行 {idx+1}: 功率不可為負")
+                    
                     caps = parse_list_from_string(row['capacities'])
                     probs = parse_list_from_string(row['probs'])
-
-                    # 檢查 Capacities
-                    if caps is None:
-                        errors.append(f"行 {idx+1}: 產能列表格式錯誤 (應為 list)")
-                    elif not isinstance(caps, list) or not all(isinstance(x, (int, float)) for x in caps):
-                        errors.append(f"行 {idx+1}: 產能列表內容必須為數字")
+                    
+                    if not isinstance(caps, list) or not all(isinstance(x, (int, float)) for x in caps):
+                        errors.append(f"行 {idx+1}: 產能列表格式錯誤")
                     elif len(caps) > 1 and not all(x < y for x, y in zip(caps, caps[1:])):
-                        errors.append(f"行 {idx+1}: 產能列表必須是「嚴格遞增」")
+                        errors.append(f"行 {idx+1}: 產能列表必須嚴格遞增")
+                    
+                    if not isinstance(probs, list) or not all(isinstance(x, (int, float)) for x in probs):
+                        errors.append(f"行 {idx+1}: 機率列表格式錯誤")
+                    elif probs and not math.isclose(sum(probs), 1.0, abs_tol=1e-3):
+                        errors.append(f"行 {idx+1}: 機率加總必須約為 1 (目前 {sum(probs):.3f})")
+                    
+                    if isinstance(caps, list) and isinstance(probs, list) and len(caps) != len(probs):
+                        errors.append(f"行 {idx+1}: 產能與機率列表長度不一致")
 
-                    # 檢查 Probs
-                    if probs is None:
-                        errors.append(f"行 {idx+1}: 機率列表格式錯誤 (應為 list)")
-                    elif not isinstance(probs, list) or not all(isinstance(x, (int, float)) for x in probs):
-                        errors.append(f"行 {idx+1}: 機率列表內容必須為數字")
-                    elif probs and not math.isclose(sum(probs), 1.0, abs_tol=0.01):
-                        errors.append(f"行 {idx+1}: 機率總和必須約等於 1 (目前: {sum(probs):.3f})")
-
-                    # 檢查長度一致性
-                    if isinstance(caps, list) and isinstance(probs, list):
-                        if len(caps) != len(probs):
-                            errors.append(f"行 {idx+1}: 產能數量 ({len(caps)}) 與 機率數量 ({len(probs)}) 不一致")
-
-            except Exception as e:
-                errors.append(f"驗證過程發生未預期錯誤: {str(e)}")
-
-            # --- B. 根據驗證結果設定狀態 ---
-            if errors:
-                st.session_state.show_save_error_modal = True
-                st.session_state.save_error_list = errors
-                st.session_state.show_save_success_modal = False
-                st.session_state.show_io_exception_modal = False
-                st.rerun()
-            else:
-                try:
+                if errors:
+                    st.session_state.save_error_msgs = errors
+                    st.session_state.save_modal_state = "error"
+                else:
                     base_dir = os.path.dirname(os.path.abspath(DEFAULT_EXCEL_PATH))
-                    if not os.path.exists(base_dir):
-                        os.makedirs(base_dir, exist_ok=True)
-
-                    if uploaded_file:
-                        save_path = os.path.join(base_dir, uploaded_file.name)
-                    else:
-                        save_path = os.path.abspath(DEFAULT_EXCEL_PATH)
-
+                    os.makedirs(base_dir, exist_ok=True)
+                    
+                    save_path = os.path.join(base_dir, uploaded_file.name) if uploaded_file else os.path.abspath(DEFAULT_EXCEL_PATH)
+                    
                     if os.path.exists(save_path):
                         try:
                             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                            bk_name = f"backup_{ts}_{os.path.basename(save_path)}"
-                            bk_path = os.path.join(base_dir, bk_name)
+                            bk_path = os.path.join(base_dir, f"backup_{ts}_{os.path.basename(save_path)}")
                             shutil.copy(save_path, bk_path)
-                        except Exception:
-                            pass 
+                        except: pass
 
                     df_normalized.to_excel(save_path, index=False)
                     st.session_state.df_data = df_normalized
                     st.session_state.last_save_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-                    st.session_state.show_save_success_modal = True
-                    st.session_state.show_save_error_modal = False
-                    st.session_state.show_io_exception_modal = False
-                    st.rerun()
-
-                except Exception as e:
-                    st.session_state.show_io_exception_modal = True
-                    st.session_state.io_exception_msg = str(e)
-                    st.session_state.show_save_success_modal = False
-                    st.session_state.show_save_error_modal = False
-                    st.rerun()
-
-        # 4. Render Modals (使用 Container 搭配 CSS :has 選擇器鎖定整個區塊)
-        # 這種做法可以讓 Python 按鈕與 HTML 文字乖乖待在同一個浮動視窗內
-        
-        # --- 情境一：驗證失敗 (Container Modal) ---
-        if st.session_state.show_save_error_modal:
-            with modal_container.container():
-                # 注入 CSS：鎖定包含 'error-marker' 的 VerticalBlock，將其變為 Fixed Modal
-                st.markdown("""
-                    <style>
-                    div[data-testid="stVerticalBlock"]:has(div#error-marker) {
-                        position: fixed !important;
-                        top: 50% !important;
-                        left: 50% !important;
-                        transform: translate(-50%, -50%) !important;
-                        width: 550px !important;
-                        max-width: 90vw !important;
-                        background-color: rgba(40, 10, 10, 0.98) !important;
-                        border: 2px solid #ff6b6b !important;
-                        border-radius: 12px !important;
-                        padding: 25px !important;
-                        z-index: 1000001 !important;
-                        box-shadow: 0 0 40px rgba(0,0,0,0.8) !important;
-                        gap: 10px !important;
-                    }
-                    /* 遮罩背景 */
-                    div[data-testid="stVerticalBlock"]:has(div#error-marker)::before {
-                        content: "";
-                        position: fixed; top: -100vh; left: -100vw; width: 300vw; height: 300vh;
-                        background: rgba(0,0,0,0.6); backdrop-filter: blur(3px); z-index: -1;
-                    }
-                    div#error-marker { display: none; }
-                    </style>
-                    <div id="error-marker"></div>
-                    """, unsafe_allow_html=True)
-                
-                # 顯示錯誤訊息 (HTML)
-                error_items = "".join([f"<li style='margin-bottom:5px;'>{err}</li>" for err in st.session_state.save_error_list])
-                st.markdown(f"""
-                    <div style="text-align: center; color: #fff;">
-                        <div style="font-size: 50px; margin-bottom: 10px;">⚠️</div>
-                        <h3 style="color: #ff6b6b; margin: 0 0 10px 0;">資料驗證未通過</h3>
-                        <div style="text-align: left; max-height: 200px; overflow-y: auto; background: rgba(0,0,0,0.3); padding: 15px; border-radius: 8px; border: 1px solid #555; margin-bottom: 5px;">
-                            <ul style="margin: 0; padding-left: 20px; color: #ffcccc; font-size: 0.95rem;">
-                                {error_items}
-                            </ul>
-                        </div>
-                    </div>
-                """, unsafe_allow_html=True)
-                
-                # 顯示按鈕 (Python 原生按鈕，自然排列在下方)
-                # 使用 columns 來置中按鈕
-                c1, c2, c3 = st.columns([1, 2, 1])
-                with c2:
-                    if st.button("❌ 關閉視窗", key="btn_close_error"):
-                        st.session_state.show_save_error_modal = False
-                        st.rerun()
-
-        # --- 情境二：儲存發生例外 (Container Modal) ---
-        elif st.session_state.show_io_exception_modal:
-            with modal_container.container():
-                st.markdown("""
-                    <style>
-                    div[data-testid="stVerticalBlock"]:has(div#exception-marker) {
-                        position: fixed !important; top: 50% !important; left: 50% !important;
-                        transform: translate(-50%, -50%) !important;
-                        width: 500px !important;
-                        background-color: rgba(60, 10, 10, 0.98) !important;
-                        border: 2px solid #ff0000 !important; border-radius: 15px !important;
-                        padding: 30px !important; z-index: 1000001 !important;
-                        box-shadow: 0 0 50px rgba(255, 0, 0, 0.3) !important;
-                        gap: 15px !important;
-                    }
-                    div[data-testid="stVerticalBlock"]:has(div#exception-marker)::before {
-                        content: ""; position: fixed; top: -100vh; left: -100vw; width: 300vw; height: 300vh;
-                        background: rgba(0,0,0,0.6); backdrop-filter: blur(3px); z-index: -1;
-                    }
-                    div#exception-marker { display: none; }
-                    </style>
-                    <div id="exception-marker"></div>
-                    """, unsafe_allow_html=True)
-                
-                st.markdown(f"""
-                    <div style="text-align: center; color: #fff;">
-                        <div style="font-size: 60px; margin-bottom: 10px;">🚫</div>
-                        <h3 style="color: #ff6b6b; margin: 0;">檔案儲存失敗</h3>
-                        <div style="background: rgba(0,0,0,0.4); padding: 15px; margin-top: 15px; border-radius: 8px; text-align: left; font-family: monospace; font-size: 13px; color: #ffaaaa;">
-                            {st.session_state.io_exception_msg}
-                        </div>
-                        <p style="margin-top: 15px; color: #ddd; font-size: 14px;">請檢查檔案權限或路徑設定。</p>
-                    </div>
-                """, unsafe_allow_html=True)
-
-                c1, c2, c3 = st.columns([1, 2, 1])
-                with c2:
-                    if st.button("❌ 關閉視窗", key="btn_close_exception"):
-                        st.session_state.show_io_exception_modal = False
-                        st.rerun()
-
-        # --- 情境三：儲存成功 (自動淡出，無按鈕) ---
-        elif st.session_state.show_save_success_modal:
-            st.balloons()
-            fade_css = """
-            <style>
-            @keyframes fadeOutAnim { 0% { opacity: 1; transform: translate(-50%, -50%) scale(1); } 100% { opacity: 0; transform: translate(-50%, -50%) scale(0.9); } }
-            .modal-fade-out { animation: fadeOutAnim 1s ease-out forwards; }
-            </style>
-            """
-            success_html = f"""
-            {fade_css}
-            <div id="success-modal" style="
-                position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-                z-index: 999999;
-                background: linear-gradient(135deg, rgba(11, 22, 38, 0.98), rgba(28, 69, 50, 0.95));
-                border: 2px solid #4cd37a; border-radius: 20px;
-                padding: 40px; text-align: center; width: 450px;
-                box-shadow: 0 0 60px rgba(76, 211, 122, 0.4);
-                backdrop-filter: blur(10px);
-            ">
-                <div style="font-size: 70px; margin-bottom: 15px; animation: kpiPulse 1.5s infinite;">✅</div>
-                <h2 style="color: #4cd37a; margin: 0; font-weight: 800; letter-spacing: 1px;">儲存成功！</h2>
-                <p style="color: #e6eef6; margin-top: 10px; font-size: 16px;">資料驗證通過並已安全寫入</p>
-                <div style="margin-top: 20px; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 10px;">
-                    <span style="color: #88f2ff; font-size: 13px; font-family: monospace;">
-                        TIMESTAMP: {st.session_state.last_save_time}
-                    </span>
-                </div>
-            </div>
-            """
-            modal_container.markdown(success_html, unsafe_allow_html=True)
-            time.sleep(5)
-            success_html_fade = success_html.replace('id="success-modal"', 'id="success-modal" class="modal-fade-out"')
-            modal_container.markdown(success_html_fade, unsafe_allow_html=True)
-            time.sleep(1)
-            st.session_state.show_save_success_modal = False
+                    st.session_state.save_modal_state = "success"
+            
+            except Exception as e:
+                st.session_state.io_error_msg = str(e)
+                st.session_state.save_modal_state = "io_error"
+            
             st.rerun()
+
+    # === Modal Render Logic ===
+    modal_container = st.empty()
+    
+    if st.session_state.save_modal_state == "error":
+        with modal_container.container():
+            st.markdown("""<style>div[data-testid="stVerticalBlock"]:has(div#modal-marker){position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:550px;background:rgba(40,10,10,0.98);border:2px solid #ff6b6b;border-radius:12px;padding:30px;z-index:1000001;box-shadow:0 0 50px rgba(0,0,0,0.8);}div[data-testid="stVerticalBlock"]:has(div#modal-marker)::before{content:"";position:fixed;top:-100vh;left:-100vw;width:300vw;height:300vh;background:rgba(0,0,0,0.6);backdrop-filter:blur(3px);z-index:-1;}div#modal-marker{display:none;}</style><div id="modal-marker"></div>""", unsafe_allow_html=True)
+            error_html = "".join([f"<li style='margin-bottom:5px;'>{e}</li>" for e in st.session_state.save_error_msgs])
+            st.markdown(f"<div style='text-align:center;color:#fff;'><div style='font-size:50px;'>⚠️</div><h3 style='color:#ff6b6b;'>驗證失敗</h3><ul style='text-align:left;max-height:200px;overflow-y:auto;background:rgba(0,0,0,0.3);padding:15px;color:#ffcccc;'>{error_html}</ul></div>", unsafe_allow_html=True)
+            st.markdown('<div id="modal-btn-marker"></div>', unsafe_allow_html=True)
+            c1, c2, c3 = st.columns([1, 1, 1]) 
+            with c2:
+                if st.button("❌ 關閉視窗"):
+                    st.session_state.save_modal_state = "hidden"
+                    st.rerun()
+
+    elif st.session_state.save_modal_state == "io_error":
+        with modal_container.container():
+            st.markdown("""<style>div[data-testid="stVerticalBlock"]:has(div#modal-marker){position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:500px;background:rgba(60,10,10,0.98);border:2px solid #ff0000;border-radius:15px;padding:30px;z-index:1000001;box-shadow:0 0 50px rgba(0,0,0,0.8);}div[data-testid="stVerticalBlock"]:has(div#modal-marker)::before{content:"";position:fixed;top:-100vh;left:-100vw;width:300vw;height:300vh;background:rgba(0,0,0,0.6);backdrop-filter:blur(3px);z-index:-1;}div#modal-marker{display:none;}</style><div id="modal-marker"></div>""", unsafe_allow_html=True)
+            st.markdown(f"<div style='text-align:center;color:#fff;'><div style='font-size:60px;'>🚫</div><h3 style='color:#ff6b6b;'>儲存失敗</h3><div style='background:rgba(0,0,0,0.4);padding:10px;margin:15px 0;font-family:monospace;color:#ffaaaa;'>{st.session_state.io_error_msg}</div></div>", unsafe_allow_html=True)
+            st.markdown('<div id="modal-btn-marker"></div>', unsafe_allow_html=True)
+            c1, c2, c3 = st.columns([1, 1, 1])
+            with c2:
+                if st.button("❌ 關閉視窗"):
+                    st.session_state.save_modal_state = "hidden"
+                    st.rerun()
+
+    elif st.session_state.save_modal_state == "upload_error":
+        with modal_container.container():
+            st.markdown("""<style>div[data-testid="stVerticalBlock"]:has(div#modal-marker){position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:550px;background:rgba(40,10,10,0.98);border:2px solid #ff6b6b;border-radius:12px;padding:30px;z-index:1000001;box-shadow:0 0 50px rgba(0,0,0,0.8);}div[data-testid="stVerticalBlock"]:has(div#modal-marker)::before{content:"";position:fixed;top:-100vh;left:-100vw;width:300vw;height:300vh;background:rgba(0,0,0,0.6);backdrop-filter:blur(3px);z-index:-1;}div#modal-marker{display:none;}</style><div id="modal-marker"></div>""", unsafe_allow_html=True)
+            st.markdown(f"<div style='text-align:center;color:#fff;'><div style='font-size:60px;'>⚠️</div><h3 style='color:#ff6b6b;'>資料讀取錯誤</h3><p style='color:#ccc;'>請確認 Excel 檔案格式是否正確。</p><div style='background:rgba(0,0,0,0.4);padding:10px;margin:15px 0;font-family:monospace;color:#ffaaaa;text-align:left;max-height:150px;overflow-y:auto;'>{st.session_state.upload_error_msg}</div></div>", unsafe_allow_html=True)
+            st.markdown('<div id="modal-btn-marker"></div>', unsafe_allow_html=True)
+            c1, c2, c3 = st.columns([1, 1, 1])
+            with c2:
+                if st.button("關閉"):
+                    st.session_state.save_modal_state = "hidden"
+                    st.rerun()
+
+    elif st.session_state.save_modal_state == "success":
+        st.balloons()
+        fade_css = """<style>@keyframes fadeOutAnim {0%{opacity:1;}100%{opacity:0;transform:translate(-50%,-50%) scale(0.9);}}.modal-fade-out{animation:fadeOutAnim 1s ease-out forwards;}</style>"""
+        success_html = f"""{fade_css}<div id="success-modal" style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:999999;background:linear-gradient(135deg,rgba(11,22,38,0.98),rgba(28,69,50,0.95));border:2px solid #4cd37a;border-radius:20px;padding:40px;text-align:center;width:450px;box-shadow:0 0 60px rgba(76,211,122,0.4);backdrop-filter:blur(10px);"><div style="font-size:70px;margin-bottom:15px;">✅</div><h2 style="color:#4cd37a;">儲存成功！</h2><p style="color:#e6eef6;">資料已更新並寫入檔案</p><div style="margin-top:20px;border-top:1px solid rgba(255,255,255,0.1);padding-top:10px;color:#88f2ff;font-size:13px;font-family:monospace;">{st.session_state.last_save_time}</div></div>"""
+        
+        modal_container.markdown(success_html, unsafe_allow_html=True)
+        time.sleep(3)
+        modal_container.markdown(success_html.replace('id="success-modal"', 'id="success-modal" class="modal-fade-out"'), unsafe_allow_html=True)
+        time.sleep(1)
+        st.session_state.save_modal_state = "hidden"
+        st.rerun()
+
+    elif st.session_state.save_modal_state == "reset":
+        fade_css = """<style>@keyframes fadeOutAnim {0%{opacity:1;}100%{opacity:0;transform:translate(-50%,-50%) scale(0.9);}}.modal-fade-out{animation:fadeOutAnim 1s ease-out forwards;}</style>"""
+        reset_html = f"""{fade_css}<div id="reset-modal" style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:999999;background:rgba(10,30,60,0.95);border:2px solid #3fe6ff;border-radius:15px;padding:30px;text-align:center;width:400px;box-shadow:0 0 50px rgba(63,230,255,0.3);backdrop-filter:blur(5px);"><div style="font-size:50px;margin-bottom:10px;">🔄</div><h3 style="color:#3fe6ff;">已重置為預設資料</h3></div>"""
+        
+        modal_container.markdown(reset_html, unsafe_allow_html=True)
+        time.sleep(1.5)
+        modal_container.markdown(reset_html.replace('id="reset-modal"', 'id="reset-modal" class="modal-fade-out"'), unsafe_allow_html=True)
+        time.sleep(1)
+        st.session_state.save_modal_state = "hidden"
+        st.rerun()
 #在終端機輸入：python -m streamlit run "C:\Users\user\OneDrive\桌面\dashboard.py"
